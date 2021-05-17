@@ -63,8 +63,10 @@ class ZoneType(IntEnum):
 
 
 class PacketType(IntEnum):
-    REQUEST_CONTROLLER_COUNT = 0
-    REQUEST_CONTROLLER_DATA = 1
+    REQUEST_RGB_CONTROLLER_COUNT = 0
+    REQUEST_RGB_CONTROLLER_DATA = 1
+    REQUEST_FAN_CONTROLLER_COUNT = 2
+    REQUEST_FAN_CONTROLLER_DATA = 3
     REQUEST_PROTOCOL_VERSION = 40
     SET_CLIENT_NAME = 50
     DEVICE_LIST_UPDATED = 100
@@ -78,6 +80,8 @@ class PacketType(IntEnum):
     RGBCONTROLLER_UPDATESINGLELED = 1052
     RGBCONTROLLER_SETCUSTOMMODE = 1100
     RGBCONTROLLER_UPDATEMODE = 1101
+    FANCONTROLLER_UPDATECONTROL = 2000
+    FANCONTROLLER_UPDATEREADING = 2001
 
 
 class OpenRGBDisconnected(ConnectionError):
@@ -418,7 +422,7 @@ class MetaData:
 
 
 @dataclass
-class ControllerData:
+class RGBControllerData:
     name: str
     metadata: MetaData
     device_type: DeviceType
@@ -449,12 +453,12 @@ class ControllerData:
         return buff
 
     @classmethod
-    def unpack(cls, data: bytearray, version: int, start: int = 0) -> ControllerData:
+    def unpack(cls, data: bytearray, version: int, start: int = 0) -> RGBControllerData:
         '''
-        Unpacks the raw bytes received from the SDK into a ControllerData dataclass
+        Unpacks the raw bytes received from the SDK into a RGBControllerData dataclass
 
         :param data: The raw data from a response to a request for device data
-        :returns: A ControllerData dataclass ready to pass into the OpenRGBClient's calback function
+        :returns: A RGBControllerData dataclass ready to pass into the OpenRGBClient's calback function
         '''
         buff = struct.unpack("Ii", data[start:start + struct.calcsize("Ii")])
         start += struct.calcsize("Ii")
@@ -509,7 +513,7 @@ class LocalProfile:
     '''
     A dataclass to load, store, and pack the data found in an OpenRGB profile file.
     '''
-    controllers: list[ControllerData]
+    controllers: list[RGBControllerData]
 
     def pack(self) -> bytearray:
         data = bytearray()
@@ -533,7 +537,7 @@ class LocalProfile:
                 break
             size = struct.unpack("I", d)[0]
             profile.seek(profile.tell() - struct.calcsize("I"))
-            new_data = ControllerData.unpack(profile.read(size), version)
+            new_data = RGBControllerData.unpack(profile.read(size), version)
             controllers.append(new_data)
         return cls(controllers)
 
@@ -626,3 +630,144 @@ class RGBContainer(RGBObject):
         self._colors = self.colors[:]
         if not fast:
             self.update()
+
+
+@dataclass
+class FanControllerMetaData:
+    description: str
+    version: str
+    serial: str
+    location: str
+
+    def pack(self, version: int) -> bytearray:
+        '''
+        Packs itself into a bytearray ready to be sent to the SDK or saved in a profile
+
+        :returns: raw data ready to be sent or saved
+        '''
+        buff = (
+            pack_string(self.description)
+            + pack_string(self.version)
+            + pack_string(self.serial)
+            + pack_string(self.location)
+        )
+        return buff
+
+    @classmethod
+    def unpack(cls, data: bytearray, version: int, start: int = 0, *args) -> tuple[int, FanControllerMetaData]:
+        '''
+        Unpacks the raw data into a FanControllerMetaData object
+
+        :param data: The raw byte data to unpack
+        :param start: What place in the data object to start
+        '''
+        buff = []
+        for x in range(4):
+            start, val = parse_string(data, start)
+            buff.append(val)
+        return start, cls(*buff)
+
+
+@dataclass
+class FanSingleValueData:
+    value: int
+
+    def pack(self, version: int) -> bytearray:
+        '''
+        Packs itself into a bytearray ready to be sent to the SDK or saved in a profile
+
+        :returns: raw data ready to be sent or saved
+        '''
+        buff = struct.pack("I", self.value)
+        return buff
+
+    @classmethod
+    def unpack(cls, data: bytearray, version: int, start: int = 0, *args) -> tuple[int, FanSingleValueData]:
+        '''
+        Unpacks the raw data into a FanSingleValueData object
+
+        :param data: The raw byte data to unpack
+        :param start: What place in the data object to start
+        '''
+        buff = list(struct.unpack("I", data[start:start + struct.calcsize("I")]))
+        start += struct.calcsize("I")
+        return start, cls(*buff)
+
+
+@dataclass
+class FanData:
+    name: str
+    speed_cmd: int
+    speed_min: int
+    speed_max: int
+    rpm_rdg: int
+
+    def pack(self, version: int) -> bytearray:
+        '''
+        Packs itself into a bytearray ready to be sent to the SDK or saved in a profile
+
+        :returns: raw data ready to be sent or saved
+        '''
+        buff = (
+            pack_string(self.name)
+            + struct.pack(
+                "4I",
+                self.speed_cmd,
+                self.speed_min,
+                self.speed_max,
+                self.rpm_rdg
+            )
+        )
+        return buff
+
+    @classmethod
+    def unpack(cls, data: bytearray, version: int, start: int = 0, *args) -> tuple[int, FanData]:
+        '''
+        Unpacks the raw data into a FanData object
+
+        :param data: The raw byte data to unpack
+        :param start: What place in the data object to start
+        '''
+        start, name = parse_string(data, start)
+        buff = list(struct.unpack("4I", data[start:start + struct.calcsize("4I")]))
+        start += struct.calcsize("4I")
+        return start, cls(name, *buff)
+
+@dataclass
+class FanControllerData:
+    name: str
+    metadata: FanControllerMetaData
+    fans: list[FanData]
+
+    def pack(self, version: int) -> bytearray:
+        '''
+        Packs itself into a bytearray ready to be sent to the SDK or saved in a profile
+
+        :returns: raw data ready to be sent or saved
+        '''
+        buff = (
+            pack_string(self.name)
+            + self.metadata.pack(version)
+            + pack_list(self.fans, version)
+        )
+        buff = struct.pack("I", len(buff) + struct.calcsize("I")) + buff
+        return buff
+
+    @classmethod
+    def unpack(cls, data: bytearray, version: int, start: int = 0) -> FanControllerData:
+        '''
+        Unpacks the raw bytes received from the SDK into a FanControllerData dataclass
+
+        :param data: The raw data from a response to a request for device data
+        :returns: A FanControllerData dataclass ready to pass into the OpenRGBClient's calback function
+        '''
+        start += struct.calcsize("I")
+        start, name = parse_string(data, start)
+        start, metadata = FanControllerMetaData.unpack(data, version, start)
+        start, fans = parse_list(FanData, data, version, start)
+
+        return cls(
+            name,
+            metadata,
+            fans
+        )

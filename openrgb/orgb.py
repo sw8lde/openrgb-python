@@ -137,7 +137,7 @@ class Device(utils.RGBContainer):
     A class to represent an RGB Device
     '''
 
-    def __init__(self, data: utils.ControllerData, device_id: int, network_client: NetworkClient):
+    def __init__(self, data: utils.RGBControllerData, device_id: int, network_client: NetworkClient):
         self.leds = [None for i in data.leds]
         self.zones = [None for i in data.zones]
         self.id = device_id
@@ -145,7 +145,7 @@ class Device(utils.RGBContainer):
         self.comms = network_client
         self._update(data)
 
-    def _update(self, data: utils.ControllerData):
+    def _update(self, data: utils.RGBControllerData):
         self.name = data.name
         self.metadata = data.metadata
         self.type = data.device_type
@@ -245,11 +245,93 @@ class Device(utils.RGBContainer):
         )
 
 
+class Fan():
+    '''
+    A class to represent individial fans
+    '''
+
+    def __init__(self, data: utils.FanData, fan_id: int, device_id: int, network_client: NetworkClient):
+        self.device_id = device_id
+        self.comms = network_client
+        self.id = fan_id
+        self._update(data)
+
+    def _update(self, data: utils.FanData):
+        self.name = data.name
+        self.speed_min = data.speed_min
+        self.speed_max = data.speed_max
+        self.__speed_cmd = data.speed_cmd
+        self.rpm_rdg = data.rpm_rdg
+
+    @property
+    def speed_cmd(self):
+        return self.__speed_cmd
+
+    @speed_cmd.setter
+    def speed_cmd(self, value: int):
+        self.__speed_cmd = max(self.speed_min, min(self.speed_max, value))
+
+
+class FanController():
+    '''
+    A class to represent a fan controller
+    '''
+
+    def __init__(self, data: utils.RGBControllerData, device_id: int, network_client: NetworkClient):
+        self.id = device_id
+        self.device_id = device_id
+        self.comms = network_client
+        self.fans = [None for i in data.fans]
+        self._update(data)
+
+    def _update(self, data: utils.RGBControllerData):
+        self.name = data.name
+        self.metadata = data.metadata
+        if len(self.fans) != len(data.fans):
+            self.fans = [None for i in data.fans]
+        for x in range(len(data.fans)):
+            if self.fans[x] is None:
+                self.fans[x] = Fan(data.fans[x], x, self.device_id, self.comms)
+            else:
+                self.fans[x]._update(data.fans[x])
+        self.data = data
+
+    def _updateReading(self, data: list[utils.FanSingleValueData]):
+        '''
+        Update the fan readings with values from the server
+        '''
+        for i, fan_data in enumerate(data):
+            self.fans[i].rpm_rdg = fan_data.value
+
+    def updateReading(self):
+        '''
+        Update the fan readings
+        '''
+        self.comms.send_header(self.device_id, utils.PacketType.FANCONTROLLER_UPDATEREADING, 0)
+        self.comms.read()
+
+    def updateControl(self):
+        '''
+        Set the fan speed commands to their current values
+        '''
+        commands = [ utils.FanSingleValueData(fan.speed_cmd) for fan in self.fans ]
+
+        buff = utils.pack_list(commands, self.comms._protocol_version)
+        buff = struct.pack("I", len(buff)) + buff
+
+        self.comms.send_header(
+            self.device_id,
+            utils.PacketType.FANCONTROLLER_UPDATECONTROL,
+            struct.calcsize(f"=IH{len(commands)}I")
+        )
+        self.comms.send_data(buff)
+
+
 class OpenRGBClient(utils.RGBObject):
     '''
     This is the only class you should need to manually instantiate.  It
     initializes the communication, gets the device information, and creates
-    Devices, Zones, and LEDs for you.
+    Devices, Zones, LEDs, and FanControllers for you.
     '''
 
     def __init__(self, address: str = "127.0.0.1", port: int = 6742, name: str = "openrgb-python", protocol_version: int = None):
@@ -260,12 +342,15 @@ class OpenRGBClient(utils.RGBObject):
         '''
         self.device_num = 0
         self.devices = []
+        self.fan_controller_num = 0
+        self.fan_controllers = []
         self.profiles = []
         self.comms = NetworkClient(self._callback, address, port, name, protocol_version)
         self.address = address
         self.port = port
         self.name = name
         self.comms.requestDeviceNum()
+        self.comms.requestFanControllerNum()
         while any((dev is None for dev in self.devices)):
             sleep(.1)
         if self.comms._protocol_version >= 2:
@@ -274,26 +359,48 @@ class OpenRGBClient(utils.RGBObject):
     def __repr__(self):
         return f"OpenRGBClient(address={self.address}, port={self.port}, name={self.name})"
 
-    def _callback(self, device: int, type: int, data: Optional):
-        if type == utils.PacketType.REQUEST_CONTROLLER_COUNT:
+    def _callback(self, device_id: int, type: int, data: Optional):
+        if type == utils.PacketType.REQUEST_RGB_CONTROLLER_COUNT:
             if data != self.device_num or data != len(self.devices):
                 self.device_num = data
                 self.devices = [None for x in range(self.device_num)]
                 for x in range(self.device_num):
                     self.comms.requestDeviceData(x)
-        elif type == utils.PacketType.REQUEST_CONTROLLER_DATA:
+        elif type == utils.PacketType.REQUEST_RGB_CONTROLLER_DATA:
             try:
-                if self.devices[device] is None:
-                    self.devices[device] = Device(data, device, self.comms)
+                if self.devices[device_id] is None:
+                    self.devices[device_id] = Device(data, device_id, self.comms)
                 else:
-                    self.devices[device]._update(data)
+                    self.devices[device_id]._update(data)
             except IndexError:
                 self.comms.requestDeviceNum()
+        elif type == utils.PacketType.REQUEST_FAN_CONTROLLER_COUNT:
+            if data != self.fan_controller_num or data != len(self.fan_controllers):
+                self.fan_controller_num = data
+                self.fan_controllers = [None for x in range(self.fan_controller_num)]
+                for x in range(self.fan_controller_num):
+                    self.comms.requestFanControllerData(x)
+        elif type == utils.PacketType.REQUEST_FAN_CONTROLLER_DATA:
+            try:
+                if self.fan_controllers[device_id] is None:
+                    self.fan_controllers[device_id] = FanController(data, device_id, self.comms)
+                else:
+                    self.fan_controllers[device_id]._update(data)
+            except IndexError:
+                self.comms.requestFanControllerNum()
         elif type == utils.PacketType.DEVICE_LIST_UPDATED:
             self.device_num = 0
             self.comms.requestDeviceNum()
         elif type == utils.PacketType.REQUEST_PROFILE_LIST:
             self.profiles = data
+        elif type == utils.PacketType.FANCONTROLLER_UPDATEREADING:
+            try:
+                if self.fan_controllers[device_id] is None:
+                    self.comms.requestFanControllerData(device_id)
+                else:
+                    self.fan_controllers[device_id]._updateReading(data)
+            except IndexError:
+                self.comms.requestDeviceNum()
 
     def set_color(self, color: utils.RGBColor, fast: bool = False):
         '''

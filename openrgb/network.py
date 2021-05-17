@@ -82,7 +82,7 @@ class NetworkClient:
             self.lock.release()
         except Exception:
             pass
-        
+
         if self.sock is not None:
             self.sock.close()
             self.sock = None
@@ -111,7 +111,7 @@ class NetworkClient:
         if buff[:4] == [b'O', b'R', b'G', b'B']:
             device_id, packet_type, packet_size = buff[4:]
             # print(device_id, packet_type, packet_size)
-            if packet_type == utils.PacketType.REQUEST_CONTROLLER_COUNT:
+            if packet_type == utils.PacketType.REQUEST_RGB_CONTROLLER_COUNT:
                 try:
                     buff = struct.unpack("I", self.sock.recv(packet_size))
                     self.lock.release()
@@ -124,7 +124,7 @@ class NetworkClient:
                         self.lock.release()
                     except RuntimeError:
                         pass
-            elif packet_type == utils.PacketType.REQUEST_CONTROLLER_DATA:
+            elif packet_type == utils.PacketType.REQUEST_RGB_CONTROLLER_DATA:
                 try:
                     data =  bytearray()
                     while len(data) < packet_size:
@@ -134,7 +134,27 @@ class NetworkClient:
                     raise utils.OpenRGBDisconnected() from e
                 finally:
                     self.lock.release()
-                self.callback(device_id, packet_type, utils.ControllerData.unpack(data, self._protocol_version))
+                self.callback(device_id, packet_type, utils.RGBControllerData.unpack(data, self._protocol_version))
+            elif packet_type == utils.PacketType.REQUEST_FAN_CONTROLLER_COUNT:
+                try:
+                    buff = struct.unpack("I", self.sock.recv(packet_size))
+                except utils.CONNECTION_ERRORS as e:
+                    self.stop_connection()
+                    raise utils.OpenRGBDisconnected() from e
+                finally:
+                    self.lock.release()
+                self.callback(device_id, packet_type, buff[0])
+            elif packet_type == utils.PacketType.REQUEST_FAN_CONTROLLER_DATA:
+                try:
+                    data =  bytearray()
+                    while len(data) < packet_size:
+                        data += self.sock.recv(packet_size - len(data))
+                except utils.CONNECTION_ERRORS as e:
+                    self.stop_connection()
+                    raise utils.OpenRGBDisconnected() from e
+                finally:
+                    self.lock.release()
+                self.callback(device_id, packet_type, utils.FanControllerData.unpack(data, self._protocol_version))
             elif packet_type == utils.PacketType.DEVICE_LIST_UPDATED:
                 assert device_id == 0 and packet_size == 0
                 self.read()
@@ -159,6 +179,18 @@ class NetworkClient:
                 finally:
                     self.lock.release()
                 self.callback(device_id, packet_type, utils.parse_list(utils.Profile, data, self._protocol_version, 4)[1])
+            elif packet_type == utils.PacketType.FANCONTROLLER_UPDATEREADING:
+                try:
+                    data =  bytearray()
+                    while len(data) < packet_size:
+                        data += self.sock.recv(packet_size - len(data))
+                except utils.CONNECTION_ERRORS as e:
+                    self.stop_connection()
+                    raise utils.OpenRGBDisconnected() from e
+                finally:
+                    self.lock.release()
+                self.callback(device_id, packet_type, utils.parse_list(utils.FanSingleValueData, data, self._protocol_version, struct.calcsize("I"))[1])
+
 
     def requestDeviceData(self, device: int):
         '''
@@ -168,7 +200,7 @@ class NetworkClient:
         '''
         if self.sock is None:
             raise utils.OpenRGBDisconnected()
-        self.send_header(device, utils.PacketType.REQUEST_CONTROLLER_DATA, struct.calcsize('I'))
+        self.send_header(device, utils.PacketType.REQUEST_RGB_CONTROLLER_DATA, struct.calcsize('I'))
         self.send_data(struct.pack("I", self._protocol_version), False)
         self.read()
 
@@ -176,7 +208,23 @@ class NetworkClient:
         '''
         Requesting the number of devices from the SDK server
         '''
-        self.send_header(0, utils.PacketType.REQUEST_CONTROLLER_COUNT, 0)
+        self.send_header(0, utils.PacketType.REQUEST_RGB_CONTROLLER_COUNT, 0)
+        self.read()
+
+    def requestFanControllerData(self, fan_controller: int):
+        '''
+        Sends the request for a fan controller's data
+
+        :param fan_controller: the id of the fan controller to request data for
+        '''
+        self.send_header(fan_controller, utils.PacketType.REQUEST_FAN_CONTROLLER_DATA, 0)
+        self.read()
+
+    def requestFanControllerNum(self):
+        '''
+        Requesting the number of fan controllers from the SDK server
+        '''
+        self.send_header(0, utils.PacketType.REQUEST_FAN_CONTROLLER_COUNT, 0)
         self.read()
 
     def requestProfileList(self):
@@ -206,10 +254,13 @@ class NetworkClient:
             if sent != len(data):
                 self.stop_connection()
                 raise utils.OpenRGBDisconnected()
-            if packet_size == 0 and packet_type not in (utils.PacketType.REQUEST_CONTROLLER_COUNT,\
-                                                  utils.PacketType.REQUEST_CONTROLLER_DATA,\
+            if packet_size == 0 and packet_type not in (utils.PacketType.REQUEST_RGB_CONTROLLER_COUNT,\
+                                                  utils.PacketType.REQUEST_RGB_CONTROLLER_DATA,\
+                                                  utils.PacketType.REQUEST_FAN_CONTROLLER_COUNT,\
+                                                  utils.PacketType.REQUEST_FAN_CONTROLLER_DATA,\
                                                   utils.PacketType.REQUEST_PROTOCOL_VERSION,\
-                                                  utils.PacketType.REQUEST_PROFILE_LIST):
+                                                  utils.PacketType.REQUEST_PROFILE_LIST,\
+                                                  utils.PacketType.FANCONTROLLER_UPDATEREADING):
                 self.lock.release()
         except utils.CONNECTION_ERRORS as e:
             self.stop_connection()
